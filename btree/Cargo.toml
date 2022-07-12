@@ -1,0 +1,13 @@
+[package]
+name = "btree"
+version = "0.1.0"
+authors = ["Gijun Oh <ss5kijun@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.3.0"
+bincode = "1.3.3"
+anyhow = "1.0.58"
