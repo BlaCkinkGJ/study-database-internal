@@ -6,6 +6,7 @@ pub struct Offset {
 
 #[repr(C)]
 pub struct Cell {
-    pub payload: Vec<u8>,
+    pub cell_size: u64,
     pub next_cell_pos: u64,
+    pub payload: Vec<u8>,
 }

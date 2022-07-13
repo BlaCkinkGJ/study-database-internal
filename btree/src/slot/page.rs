@@ -86,6 +86,7 @@ impl SlottedPage {
             start_cell_pos: self.header.cell_cursor,
         };
         let cell = &Cell {
+            cell_size: payload.len() as u64,
             payload: payload.clone(),
             next_cell_pos: 0,
         };
