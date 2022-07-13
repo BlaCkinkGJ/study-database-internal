@@ -1,18 +1,11 @@
 #[repr(C)]
 pub struct Offset {
-    payload_size: u64,
-    start_cell_pos: u64,
-}
-
-#[repr(u8)]
-enum CellType {
-    Data = 0,
-    Pointer = 1,
+    pub payload_size: u64,
+    pub start_cell_pos: u64,
 }
 
 #[repr(C)]
 pub struct Cell {
-    cell_type: CellType,
-    payload: Vec<u8>,
-    next_cell_pos: u64,
+    pub payload: Vec<u8>,
+    pub next_cell_pos: u64,
 }

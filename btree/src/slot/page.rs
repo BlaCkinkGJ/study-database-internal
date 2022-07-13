@@ -1,4 +1,4 @@
-use super::cell::Cell;
+use super::cell::{Cell, Offset};
 use anyhow::{bail, Result};
 use std::fs::File;
 use std::io::Read;
@@ -14,33 +14,82 @@ pub struct SlottedHeader {
     reserved: u8,
     offset_cursor: u64,
     cell_cursor: u64,
+    total_body_size: u64,
 }
 
 const MAGIC_STRING: *const [u8; 7] = "btree\0\0".as_bytes().as_ptr() as *const [u8; 7];
 
 impl SlottedHeader {
-    pub fn new(offset_cursor: u64, cell_cursor: u64) -> Self {
+    pub fn new(total_body_size: u64) -> Self {
         Self {
             magic: unsafe { *MAGIC_STRING },
             reserved: unsafe { zeroed() },
-            offset_cursor,
-            cell_cursor,
+            offset_cursor: 0 as u64,
+            cell_cursor: 0 as u64,
+            total_body_size,
         }
+    }
+
+    pub fn add_offset_cursor(&mut self, offset_size: u64) -> Result<u64> {
+        let new_offset_cursor = self.offset_cursor + offset_size;
+
+        if new_offset_cursor + self.cell_cursor > self.total_body_size {
+            bail!(
+                "cursor overflow detected (offset: {}, cell: {})",
+                new_offset_cursor,
+                self.cell_cursor
+            )
+        }
+
+        self.offset_cursor = new_offset_cursor;
+
+        Ok(new_offset_cursor)
+    }
+
+    pub fn add_cell_cursor(&mut self, cell_size: u64) -> Result<u64> {
+        let new_cell_cursor = self.cell_cursor + cell_size;
+
+        if self.offset_cursor + new_cell_cursor > self.total_body_size {
+            bail!(
+                "cursor overflow detected (offset: {}, cell: {})",
+                new_cell_cursor,
+                self.cell_cursor
+            )
+        }
+
+        self.cell_cursor = new_cell_cursor;
+
+        Ok(new_cell_cursor)
     }
 }
 
+const PAGE_BODY_SIZE: usize = 264;
+
 #[repr(C)]
 pub struct SlottedPage {
-    pub header: SlottedHeader,
-    pub body: [u8; 264],
+    header: SlottedHeader,
+    body: [u8; PAGE_BODY_SIZE],
 }
 
 impl SlottedPage {
-    pub fn new(header: SlottedHeader) -> Self {
+    pub fn new() -> Self {
+        let header = SlottedHeader::new(PAGE_BODY_SIZE as u64);
         Self {
             header,
             body: unsafe { zeroed() },
         }
+    }
+
+    pub fn add_payload(&self, payload: &Vec<u8>) -> Result<()> {
+        let offset = &Offset {
+            payload_size: payload.len() as u64,
+            start_cell_pos: self.header.cell_cursor,
+        };
+        let cell = &Cell {
+            payload: payload.clone(),
+            next_cell_pos: 0,
+        };
+        Ok(())
     }
 
     pub fn pack(page: &Self, file: &mut File, pos: u64) -> Result<usize> {
@@ -93,8 +142,8 @@ mod tests {
             Err(e) => bail!("{:.?} fails to open: {:.?})", filename, e),
         };
 
-        (0..100).for_each(|i: u64| {
-            let page = SlottedPage::new(SlottedHeader::new(i, i + 100));
+        (0..100).for_each(|_: u64| {
+            let page = SlottedPage::new();
             let write_size = SlottedPage::pack(&page, &mut file, 0).expect("file write failed");
             assert_eq!(size_of::<SlottedPage>(), write_size);
         });
@@ -108,8 +157,7 @@ mod tests {
             let pos = (size_of::<SlottedPage>() as u64) * (i as u64);
             let page = SlottedPage::unpack(&mut file, pos).expect("fail to unpack");
             assert_eq!(magic, page.header.magic);
-            assert_eq!(i, page.header.offset_cursor);
-            assert_eq!(i + 100, page.header.cell_cursor);
+            assert_eq!(PAGE_BODY_SIZE as u64, page.header.total_body_size);
         });
 
         Ok(())
