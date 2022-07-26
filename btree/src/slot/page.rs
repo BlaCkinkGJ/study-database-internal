@@ -86,7 +86,7 @@ impl SlottedPage {
         let header = SlottedHeader::new(PAGE_SIZE as u64);
         Self {
             header,
-            body: unsafe { zeroed() },
+            body: [0; PAGE_SIZE],
         }
     }
 
@@ -170,7 +170,7 @@ impl SlottedPage {
 
     fn get_cell_size_from_buffer(&self, offset: &Offset) -> usize {
         let mut buffer: Vec<u8> = vec![0; size_of::<u64>()];
-        let mut cell_size: [u8; 8] = unsafe { zeroed() };
+        let mut cell_size: [u8; 8] = [0; 8];
 
         let from = offset.start_cell_pos as usize;
         let to = from + size_of::<u64>(); // size of "cell_size"
@@ -208,7 +208,10 @@ impl SlottedPage {
         let slice = Self::serialize_struct(ptr);
         file.seek(SeekFrom::Start(pos))?;
         match file.write(slice) {
-            Ok(write_size) => Ok(write_size),
+            Ok(write_size) => {
+                file.flush().expect("fail to flush file");
+                Ok(write_size)
+            }
             Err(e) => bail!(e),
         }
     }
@@ -259,10 +262,20 @@ mod tests {
             Err(e) => bail!("{:.?} fails to open: {:.?})", filename, e),
         };
 
-        (0..100).for_each(|_: u64| {
-            let page = SlottedPage::new();
-            let write_size = SlottedPage::pack(&page, &mut file, 0).expect("fail to pack");
-            assert_eq!(size_of::<SlottedPage>(), write_size);
+        let mut pos_vec: Vec<usize> = vec![];
+        let mut write_pos: usize = 0;
+        let size = 10;
+        (0..100).for_each(|i: usize| {
+            let mut page = SlottedPage::new();
+            for j in 0..size {
+                let index = (size * i) + j;
+                page.add_payload(&index.to_le_bytes().to_vec())
+                    .expect("add payload failed");
+            }
+            let write_size =
+                SlottedPage::pack(&page, &mut file, write_pos as u64).expect("fail to pack");
+            pos_vec.push(write_pos);
+            write_pos += write_size;
         });
 
         let mut file = match OpenOptions::new().read(true).open(filename.clone()) {
@@ -270,11 +283,19 @@ mod tests {
             Err(e) => bail!("{:.?} fails to open: {:.?})", filename, e),
         };
 
-        (0..100).rev().for_each(|i: u64| {
-            let pos = (size_of::<SlottedPage>() as u64) * (i as u64);
-            let page = SlottedPage::unpack(&mut file, pos).expect("fail to unpack");
+        (0..100).rev().for_each(|i: usize| {
+            let pos = match pos_vec.pop() {
+                Some(pos) => pos,
+                None => panic!("position corruption detected"),
+            };
+            let page = SlottedPage::unpack(&mut file, pos as u64).expect("fail to unpack");
             assert_eq!(magic, page.header.magic);
-            assert_eq!(PAGE_SIZE as u64, page.header.total_body_size);
+            for j in 0..size {
+                let index = (size * i) + j;
+                let mut payload: [u8; 8] = [0; 8];
+                payload.clone_from_slice(&page.read_payload(j).expect("add payload failed"));
+                assert_eq!(index, usize::from_le_bytes(payload));
+            }
         });
 
         Ok(())
