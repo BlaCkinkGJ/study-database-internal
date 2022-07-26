@@ -1,9 +1,9 @@
 use super::cell::{Cell, Offset};
 use anyhow::{bail, Result};
-use std::fs::File;
-use std::io::Read;
 use std::{
-    io::{Seek, SeekFrom, Write},
+    fs::File,
+    intrinsics::copy,
+    io::{Read, Seek, SeekFrom, Write},
     mem::{size_of, zeroed},
     slice,
 };
@@ -30,8 +30,8 @@ impl SlottedHeader {
         }
     }
 
-    pub fn add_offset_cursor(&mut self, offset_size: u64) -> Result<u64> {
-        let new_offset_cursor = self.offset_cursor + offset_size;
+    pub fn try_add_offset_cursor(&self, offset_size: usize) -> Result<u64> {
+        let new_offset_cursor = self.offset_cursor + offset_size as u64;
 
         if new_offset_cursor + self.cell_cursor > self.total_body_size {
             bail!(
@@ -41,13 +41,18 @@ impl SlottedHeader {
             )
         }
 
+        Ok(new_offset_cursor)
+    }
+
+    pub fn add_offset_cursor(&mut self, offset_size: usize) -> Result<u64> {
+        let new_offset_cursor = self.try_add_offset_cursor(offset_size)?;
         self.offset_cursor = new_offset_cursor;
 
         Ok(new_offset_cursor)
     }
 
-    pub fn add_cell_cursor(&mut self, cell_size: u64) -> Result<u64> {
-        let new_cell_cursor = self.cell_cursor + cell_size;
+    pub fn try_add_cell_cursor(&self, cell_size: usize) -> Result<u64> {
+        let new_cell_cursor = self.cell_cursor + cell_size as u64;
 
         if self.offset_cursor + new_cell_cursor > self.total_body_size {
             bail!(
@@ -57,61 +62,171 @@ impl SlottedHeader {
             )
         }
 
+        Ok(new_cell_cursor)
+    }
+
+    pub fn add_cell_cursor(&mut self, cell_size: usize) -> Result<u64> {
+        let new_cell_cursor = self.try_add_cell_cursor(cell_size)?;
         self.cell_cursor = new_cell_cursor;
 
         Ok(new_cell_cursor)
     }
 }
 
-const PAGE_BODY_SIZE: usize = 264;
+const PAGE_SIZE: usize = 4096; // bytes
 
 #[repr(C)]
 pub struct SlottedPage {
     header: SlottedHeader,
-    body: [u8; PAGE_BODY_SIZE],
+    body: [u8; PAGE_SIZE],
 }
 
 impl SlottedPage {
     pub fn new() -> Self {
-        let header = SlottedHeader::new(PAGE_BODY_SIZE as u64);
+        let header = SlottedHeader::new(PAGE_SIZE as u64);
         Self {
             header,
             body: unsafe { zeroed() },
         }
     }
 
-    pub fn add_payload(&self, payload: &Vec<u8>) -> Result<()> {
-        let offset = &Offset {
-            payload_size: payload.len() as u64,
-            start_cell_pos: self.header.cell_cursor,
-        };
-        let cell = &Cell {
-            cell_size: payload.len() as u64,
+    fn get_serialized_cell_size(payload: &Vec<u8>) -> Result<usize> {
+        match bincode::serialized_size(&Cell {
+            cell_size: 0 as u64,
+            next_cell_pos: 0 as u64,
             payload: payload.clone(),
-            next_cell_pos: 0,
-        };
+        }) {
+            Ok(cell_size) => Ok(cell_size as usize),
+            Err(e) => bail!(e),
+        }
+    }
+
+    fn write_cell_to_body(&mut self, payload: &Vec<u8>) -> Result<(usize, usize)> {
+        let cell_size = Self::get_serialized_cell_size(payload)?;
+        let cell = bincode::serialize(&mut Cell {
+            cell_size: cell_size as u64,
+            next_cell_pos: 0 as u64,
+            payload: payload.clone(),
+        })?;
+        if let Err(e) = self.header.try_add_cell_cursor(cell_size) {
+            bail!("add payload failed: {:.?}", e);
+        }
+
+        // cell writes from the back
+        let to = (self.header.total_body_size - self.header.cell_cursor) as usize;
+        let from = to - cell.len(); // cell_start_pos
+        self.body[from..to].clone_from_slice(&cell);
+        Ok((from, cell_size))
+    }
+
+    fn write_offset_to_body(&mut self, payload: &Vec<u8>, cell_start_pos: usize) -> Result<usize> {
+        let offset = bincode::serialize(&Offset {
+            payload_size: payload.len() as u64,
+            start_cell_pos: cell_start_pos as u64,
+        })?;
+
+        let offset_size = offset.len();
+        if let Err(e) = self.header.try_add_offset_cursor(offset_size) {
+            bail!("add payload failed: {:.?}", e);
+        }
+
+        // offset writes from the start
+        let from = self.header.offset_cursor as usize;
+        let to = from + offset.len() as usize;
+        self.body[from..to].clone_from_slice(&offset);
+
+        Ok(offset_size)
+    }
+
+    pub fn add_payload(&mut self, payload: &Vec<u8>) -> Result<()> {
+        // write payload to body
+        let (start_cell_pos, cell_size) = self.write_cell_to_body(payload)?;
+        let offset_size = self.write_offset_to_body(payload, start_cell_pos)?;
+
+        // update metadata
+        self.header.add_offset_cursor(offset_size)?;
+        self.header.add_cell_cursor(cell_size)?;
+
         Ok(())
+    }
+
+    fn read_offset_from_body(&self, offset_index: usize) -> Result<Offset> {
+        let offset_cursor = (offset_index * size_of::<Offset>()) as u64;
+        if offset_cursor > self.header.offset_cursor {
+            bail!(
+                "overflow offset cursor ({:.?} > {:.?})",
+                offset_cursor,
+                self.header.offset_cursor
+            )
+        }
+        let from = offset_cursor as usize;
+        let to = from + size_of::<Offset>();
+        let mut buffer: Vec<u8> = vec![0; size_of::<Offset>()];
+        buffer.clone_from_slice(&self.body[from..to]);
+
+        let offset = bincode::deserialize::<Offset>(buffer.as_slice())?;
+        Ok(offset)
+    }
+
+    fn get_cell_size_from_buffer(&self, offset: &Offset) -> usize {
+        let mut buffer: Vec<u8> = vec![0; size_of::<u64>()];
+        let mut cell_size: [u8; 8] = unsafe { zeroed() };
+
+        let from = offset.start_cell_pos as usize;
+        let to = from + size_of::<u64>(); // size of "cell_size"
+        buffer.clone_from_slice(&self.body[from..to]);
+        cell_size.clone_from_slice(buffer.as_slice());
+
+        let cell_size = u64::from_le_bytes(cell_size) as usize;
+        cell_size
+    }
+
+    fn read_cell_from_body(&self, offset: &Offset) -> Result<Cell> {
+        let cell_size = self.get_cell_size_from_buffer(offset);
+        let from = offset.start_cell_pos as usize;
+        let to = from + cell_size;
+        let mut buffer: Vec<u8> = vec![0; cell_size];
+        buffer.clone_from_slice(&self.body[from..to]);
+        let cell = bincode::deserialize::<Cell>(buffer.as_slice())?;
+        Ok(cell)
+    }
+
+    pub fn read_payload(&self, offset_index: usize) -> Result<Vec<u8>> {
+        let offset = self.read_offset_from_body(offset_index)?;
+        let cell = self.read_cell_from_body(&offset)?;
+        Ok(cell.payload)
+    }
+
+    fn serialize_struct<'a, T>(target: *const T) -> &'a [u8] {
+        let ptr: *const u8 = target as *const u8;
+        let slice: &[u8] = unsafe { slice::from_raw_parts(ptr, size_of::<T>()) };
+        slice
     }
 
     pub fn pack(page: &Self, file: &mut File, pos: u64) -> Result<usize> {
         let ptr: *const Self = page;
-        let ptr: *const u8 = ptr as *const u8;
-        let slice: &[u8] = unsafe { slice::from_raw_parts(ptr, size_of::<Self>()) };
-        file.seek(SeekFrom::Start(pos)).expect("fail to seek file");
+        let slice = Self::serialize_struct(ptr);
+        file.seek(SeekFrom::Start(pos))?;
         match file.write(slice) {
             Ok(write_size) => Ok(write_size),
             Err(e) => bail!(e),
         }
     }
 
+    fn serialize_mut_struct<'a, T>(target: *mut T) -> &'a mut [u8] {
+        let slice: &mut [u8];
+        unsafe {
+            let len = size_of::<T>();
+            slice = slice::from_raw_parts_mut(target as *mut _ as *mut u8, len);
+        }
+        slice
+    }
+
     pub fn unpack(file: &mut File, pos: u64) -> Result<Self> {
         let mut page: Self = unsafe { zeroed() };
-        file.seek(SeekFrom::Start(pos)).expect("fail to seek file");
-        unsafe {
-            let len = size_of::<Self>();
-            let slice = slice::from_raw_parts_mut(&mut page as *mut _ as *mut u8, len);
-            file.read_exact(slice).expect("fail to read file");
-        }
+        file.seek(SeekFrom::Start(pos))?;
+        let slice = Self::serialize_mut_struct(&mut page);
+        file.read_exact(slice)?;
 
         Ok(page)
     }
@@ -121,6 +236,7 @@ impl SlottedPage {
 mod tests {
     use super::*;
     use anyhow::{bail, Result};
+    use rand::{thread_rng, Rng};
     use std::{fs::OpenOptions, mem::size_of, path::Path};
     use tempfile::NamedTempFile;
 
@@ -145,7 +261,7 @@ mod tests {
 
         (0..100).for_each(|_: u64| {
             let page = SlottedPage::new();
-            let write_size = SlottedPage::pack(&page, &mut file, 0).expect("file write failed");
+            let write_size = SlottedPage::pack(&page, &mut file, 0).expect("fail to pack");
             assert_eq!(size_of::<SlottedPage>(), write_size);
         });
 
@@ -158,7 +274,7 @@ mod tests {
             let pos = (size_of::<SlottedPage>() as u64) * (i as u64);
             let page = SlottedPage::unpack(&mut file, pos).expect("fail to unpack");
             assert_eq!(magic, page.header.magic);
-            assert_eq!(PAGE_BODY_SIZE as u64, page.header.total_body_size);
+            assert_eq!(PAGE_SIZE as u64, page.header.total_body_size);
         });
 
         Ok(())
@@ -166,12 +282,46 @@ mod tests {
 
     #[test]
     fn serialize_happy() {
-        let tempfile = NamedTempFile::new().expect("create temporary file failed");
+        let tempfile = NamedTempFile::new().expect("fail to create temporal file");
         if let Err(e) = page_serialize_happy(tempfile.as_ref()) {
             eprintln!("page serialization failed: {:.?}", e);
         }
         if let Err(e) = tempfile.close() {
             eprintln!("fail to close temporary file: {:.?}", e);
         }
+    }
+
+    fn is_same_payload(a: &Vec<u8>, b: &Vec<u8>) -> bool {
+        let matching = a.iter().zip(b.iter()).filter(|&(a, b)| a == b).count();
+        matching == a.len() && matching == b.len()
+    }
+
+    #[test]
+    fn add_payload_happy() {
+        let mut rng = thread_rng();
+        let mut page = SlottedPage::new();
+        let test_cases: Vec<Vec<u8>> = (0..5)
+            .map(|_| {
+                let size: usize = rng.gen_range(1..4096);
+                (0..size).map(|_| rng.gen::<u8>()).collect()
+            })
+            .collect();
+        let (mut i, mut j) = (0, 0);
+        test_cases.iter().for_each(|data: &Vec<u8>| {
+            while let Err(_) = page.add_payload(data) {
+                page = SlottedPage::new();
+                i = 0;
+            }
+            let payload = page.read_payload(i).expect("fail to read payload");
+            assert_eq!(
+                true,
+                is_same_payload(&test_cases[j], &payload),
+                "{:.?} != {:.?}",
+                test_cases[j].len(),
+                payload.len()
+            );
+            i += 1;
+            j += 1;
+        });
     }
 }
