@@ -13,30 +13,8 @@ impl Node {
         Box::new(Self {
             n: 0,
             leaf: true,
-            key: vec![0; 2 * t as usize],
-            c: vec![None; 2 * (t - 1) as usize],
+            key: vec![0; 2 * t - 1 as usize],
+            c: vec![None; 2 * t as usize],
         })
-    }
-
-    pub fn clone(node: &Self) -> Box<Self> {
-        Box::new(Node {
-            n: node.n,
-            leaf: node.leaf,
-            key: node.key.clone(),
-            c: node.c.clone(),
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn alloc_node_happy() {
-        let node = Node::alloc_node(5);
-        for j in (1..10).rev() {
-            println!("{}", j);
-        }
     }
 }
