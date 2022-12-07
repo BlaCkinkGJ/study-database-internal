@@ -1,7 +1,9 @@
+use std::path::Path;
+
 use lsmtree::storage::Storage;
 
 fn main() {
-    let mut storage = Storage::new();
+    let mut storage = Storage::new(Path::new("./wal")).unwrap();
     println!("get 0 {:?}", storage.get("0".as_bytes()));
     println!("get 1 {:?}", storage.get("1".as_bytes()));
     println!("get 2 {:?}", storage.get("2".as_bytes()));
