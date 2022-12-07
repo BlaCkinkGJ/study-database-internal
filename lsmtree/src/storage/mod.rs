@@ -60,7 +60,7 @@ pub fn load_from_dir(dir: &Path) -> io::Result<(WAL, MemTable)> {
 
 impl Storage {
     pub fn new(dir: &Path) -> Result<Storage> {
-        let (wal, memtable) = load_from_dir(dir).unwrap_or((WAL::new(dir)?, MemTable::new()));
+        let (wal, memtable) = load_from_dir(dir)?;
         Ok(Storage { memtable, wal })
     }
 
