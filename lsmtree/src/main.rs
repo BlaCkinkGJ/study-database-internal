@@ -1,9 +1,7 @@
-use std::path::Path;
-
-use lsmtree::storage::Storage;
+use lsmtree::storage::{Storage, StorageConfig};
 
 fn main() {
-    let mut storage = Storage::new(Path::new("./wal")).unwrap();
+    let mut storage = Storage::new(StorageConfig::default_config()).unwrap();
     println!("get 0 {:?}", storage.get("0".as_bytes()));
     println!("get 1 {:?}", storage.get("1".as_bytes()));
     println!("get 2 {:?}", storage.get("2".as_bytes()));
@@ -17,4 +15,7 @@ fn main() {
     println!("get 0 {:?}", storage.get("0".as_bytes()));
     println!("get 1 {:?}", storage.get("1".as_bytes()));
     println!("get 2 {:?}", storage.get("2".as_bytes()));
+    //println!("sleep 10 seconds");
+    //std::thread::sleep_ms(10_000);
+    //storage.drop().unwrap();
 }

@@ -1,81 +1,70 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, remove_file},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-pub struct WALEntry {
+#[derive(Clone)]
+pub struct WalEntry {
     pub key: Vec<u8>,
     pub value: Option<Vec<u8>>,
     pub timestamp: u128,
     pub deleted: bool,
 }
 
-pub struct WALIterator {
+pub struct WalIterator {
     reader: BufReader<File>,
 }
 
-impl WALIterator {
-    pub fn new(path: PathBuf) -> io::Result<WALIterator> {
+impl WalIterator {
+    pub fn new(path: PathBuf) -> io::Result<WalIterator> {
         let file = OpenOptions::new().read(true).open(path)?;
         let reader = BufReader::new(file);
-        Ok(WALIterator { reader })
+        Ok(WalIterator { reader })
     }
-}
 
-impl Iterator for WALIterator {
-    type Item = WALEntry;
+    fn read_usize(&mut self) -> io::Result<usize> {
+        let mut buffer = [0; 8];
+        self.reader.read_exact(&mut buffer)?;
+        Ok(usize::from_le_bytes(buffer))
+    }
 
-    fn next(&mut self) -> Option<WALEntry> {
-        // read key length
-        let mut len_buffer = [0; 8];
-        if self.reader.read_exact(&mut len_buffer).is_err() {
-            return None;
-        }
-        let key_len = usize::from_le_bytes(len_buffer);
+    fn read_u128(&mut self) -> io::Result<u128> {
+        let mut buffer = [0; 16];
+        self.reader.read_exact(&mut buffer)?;
+        Ok(u128::from_le_bytes(buffer))
+    }
 
-        // read deleted
+    fn read_bool(&mut self) -> io::Result<bool> {
         let mut bool_buffer = [0; 1];
-        if self.reader.read_exact(&mut bool_buffer).is_err() {
-            return None;
-        }
-        let deleted = bool_buffer[0] != 0;
+        self.reader.read_exact(&mut bool_buffer)?;
+        Ok(bool_buffer[0] != 0)
+    }
 
-        let mut key = vec![0; key_len];
-        let mut value = None;
+    fn read_data(&mut self, length: usize) -> io::Result<Vec<u8>> {
+        let mut buffer= vec![0; length];
+        self.reader.read_exact(&mut buffer)?;
+        Ok(buffer)
+    }
 
-        if deleted {
-            // read deleted key
-            if self.reader.read_exact(&mut key).is_err() {
-                return None;
-            }
+    fn read_wal_entry(&mut self) -> io::Result<WalEntry> {
+        let key_len = self.read_usize()?;
+        let deleted = self.read_bool()?;
+
+        let (key, value) = if !deleted {
+            let value_len = self.read_usize()?;
+
+            let key = self.read_data(key_len)?;
+            let value = self.read_data(value_len)?;
+
+            (key, Some(value))
         } else {
-            // read value length
-            if self.reader.read_exact(&mut len_buffer).is_err() {
-                return None;
-            }
-            let value_len = usize::from_le_bytes(len_buffer);
-
-            // read key
-            if self.reader.read_exact(&mut key).is_err() {
-                return None;
-            }
-
-            // read value
-            let mut value_buf = vec![0; value_len];
-            if self.reader.read_exact(&mut value_buf).is_err() {
-                return None;
-            }
-            value = Some(value_buf);
-        }
-        // read timestamp
-        let mut timestamp_buffer = [0; 16];
-        if self.reader.read_exact(&mut timestamp_buffer).is_err() {
-            return None;
-        }
-        let timestamp = u128::from_le_bytes(timestamp_buffer);
-        Some(WALEntry {
+            // read deleted entry
+            (self.read_data(key_len)?, None)
+        };
+        let timestamp = self.read_u128()?;
+        Ok(WalEntry {
             key,
             value,
             timestamp,
@@ -84,13 +73,31 @@ impl Iterator for WALIterator {
     }
 }
 
-pub struct WAL {
+impl Iterator for WalIterator {
+    type Item = WalEntry;
+
+    fn next(&mut self) -> Option<WalEntry> {
+        match self.read_wal_entry() {
+            Ok(entry) => { Some(entry) },
+            Err(_) => {None},
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Wal {
     path: PathBuf,
     file: BufWriter<File>,
 }
 
-impl WAL {
-    pub fn new(dir: &Path) -> io::Result<WAL> {
+impl Clone for Wal {
+    fn clone(&self) -> Self {
+        Self::from_path(&self.path).unwrap()
+    }
+}
+
+impl Wal {
+    pub fn new(dir: &Path) -> io::Result<Wal> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -100,14 +107,14 @@ impl WAL {
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
         let file = BufWriter::new(file);
 
-        Ok(WAL { path, file })
+        Ok(Wal { path, file })
     }
 
-    pub fn from_path(path: &Path) -> io::Result<WAL> {
+    pub fn from_path(path: &Path) -> io::Result<Wal> {
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
         let file = BufWriter::new(file);
 
-        Ok(WAL {
+        Ok(Wal {
             path: path.to_owned(),
             file,
         })
@@ -136,13 +143,17 @@ impl WAL {
     pub fn flush(&mut self) -> io::Result<()> {
         self.file.flush()
     }
+
+    pub fn drop(&mut self) -> io::Result<()> {
+        remove_file(&self.path)
+    }
 }
 
-impl IntoIterator for WAL {
-    type IntoIter = WALIterator;
-    type Item = WALEntry;
+impl IntoIterator for Wal {
+    type IntoIter = WalIterator;
+    type Item = WalEntry;
 
-    fn into_iter(self) -> WALIterator {
-        WALIterator::new(self.path).unwrap()
+    fn into_iter(self) -> WalIterator {
+        WalIterator::new(self.path).unwrap()
     }
 }

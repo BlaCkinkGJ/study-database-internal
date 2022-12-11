@@ -1,97 +1,94 @@
 use std::{
-    fs::{read_dir, remove_file},
-    io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{memtable::MemTable, wal::WAL};
+use crate::{memtable::MemTable};
 use anyhow::{bail, Result};
 
+// TODO: add multiplier for sstable
+pub struct StorageConfig {
+    pub threshold_bytes: isize,
+    pub dir: PathBuf,
+}
+
+impl StorageConfig {
+    pub fn default_config() -> Self {
+        Self {
+            threshold_bytes: 50,
+            dir: Path::new("./wal").to_path_buf(),
+        }
+    }
+}
+
+// TODO: implement SSTABLE based on Tiering Policy
 pub struct Storage {
-    memtable: MemTable,
-    wal: WAL,
-}
-
-pub fn files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for file in read_dir(dir).unwrap() {
-        let path = file.unwrap().path();
-        if path.extension().unwrap() == ext {
-            files.push(path);
-        }
-    }
-
-    files
-}
-
-pub fn load_from_dir(dir: &Path) -> io::Result<(WAL, MemTable)> {
-    let mut wal_files = files_with_ext(dir, "wal");
-    wal_files.sort();
-
-    let mut new_mem_table = MemTable::new();
-    let mut new_wal = WAL::new(dir)?;
-    for wal_file in wal_files.iter() {
-        if let Ok(wal) = WAL::from_path(wal_file) {
-            for entry in wal.into_iter() {
-                if entry.deleted {
-                    new_mem_table.delete(entry.key.as_slice(), entry.timestamp);
-                    new_wal.delete(entry.key.as_slice(), entry.timestamp)?;
-                } else {
-                    new_mem_table.set(
-                        entry.key.as_slice(),
-                        entry.value.as_ref().unwrap().as_slice(),
-                        entry.timestamp,
-                    );
-                    new_wal.set(
-                        entry.key.as_slice(),
-                        entry.value.unwrap().as_slice(),
-                        entry.timestamp,
-                    )?;
-                }
-            }
-        }
-    }
-    new_wal.flush().unwrap();
-    wal_files.into_iter().for_each(|f| remove_file(f).unwrap());
-
-    Ok((new_wal, new_mem_table))
+    mutable: MemTable,
+    immutable: Vec<MemTable>,
+    config: StorageConfig,
 }
 
 impl Storage {
-    pub fn new(dir: &Path) -> Result<Storage> {
-        let (wal, memtable) = load_from_dir(dir)?;
-        Ok(Storage { memtable, wal })
+    pub fn new(config: StorageConfig) -> Result<Storage> {
+        let mutable = MemTable::load_from_dir(&config.dir)?;
+        let immutable = vec![];
+        Ok(Storage { mutable, immutable, config })
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>> {
-        match self.memtable.get(key) {
-            Some(entry) => {
+        // check memtable
+        if let Some(entry) = self.mutable.get(key) {
+            if let Some(value) = entry.value.as_ref() {
+                return Ok(value.clone())
+            }
+        };
+
+        // check immutable tables
+        for memtable in self.immutable.iter() {
+            if let Some(entry) = memtable.get(key) {
                 if let Some(value) = entry.value.as_ref() {
-                    Ok(value.clone())
-                } else {
-                    bail!(format!("cannot find the key ==> {:?}", key))
+                    return Ok(value.clone())
                 }
             }
-            None => {
-                bail!(format!("cannot find the key ==> {:?}", key))
-            }
         }
+
+        // fail to find
+        bail!(format!("cannot find the key ==> {:?}", key))
+    }
+
+    pub fn create_immutable_if_exceed_threshold(&mut self) -> Result<()> {
+        if self.mutable.size() >= self.config.threshold_bytes {
+            self.mutable.to_immutable();
+            // TODO: you must implement SSTABLE flush routine in here.
+            self.immutable.push(self.mutable.clone());
+            self.mutable = MemTable::new(&self.config.dir)?;
+        }
+        Ok(())
     }
 
     pub fn set(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("invalid timestamp detected");
-        self.wal.set(key, value, timestamp.as_millis())?;
-        Ok(self.memtable.set(key, value, timestamp.as_millis()))
+        self.mutable.set(key, value, timestamp.as_millis())?;
+        self.create_immutable_if_exceed_threshold()?;
+        Ok(())
     }
 
     pub fn delete(&mut self, key: &[u8]) -> Result<()> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("invalid timestamp detected");
-        self.wal.delete(key, timestamp.as_millis())?;
-        Ok(self.memtable.delete(key, timestamp.as_millis()))
+        self.mutable.delete(key, timestamp.as_millis())?;
+        self.create_immutable_if_exceed_threshold()?;
+        Ok(())
+    }
+
+    pub fn drop(&mut self) -> Result<()> {
+        self.mutable.drop()?;
+        self.immutable.iter_mut().for_each(|memtable|
+            memtable.drop().unwrap()
+        );
+        Ok(())
     }
 }
