@@ -24,7 +24,7 @@ impl StorageConfig {
 // TODO: implement SSTABLE based on Tiering Policy
 pub struct Storage {
     mutable: MemTable,
-    immutable: Vec<MemTable>,
+    immutable: Vec<MemTable>, // last element is the latest one.
     config: StorageConfig,
 }
 
