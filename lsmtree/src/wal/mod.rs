@@ -1,5 +1,5 @@
 use std::{
-    fs::{File, OpenOptions, remove_file},
+    fs::{remove_file, File, OpenOptions},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -18,10 +18,10 @@ pub struct WalIterator {
 }
 
 impl WalIterator {
-    pub fn new(path: PathBuf) -> io::Result<WalIterator> {
+    pub fn new(path: PathBuf) -> io::Result<Self> {
         let file = OpenOptions::new().read(true).open(path)?;
         let reader = BufReader::new(file);
-        Ok(WalIterator { reader })
+        Ok(Self { reader })
     }
 
     fn read_usize(&mut self) -> io::Result<usize> {
@@ -43,7 +43,7 @@ impl WalIterator {
     }
 
     fn read_data(&mut self, length: usize) -> io::Result<Vec<u8>> {
-        let mut buffer= vec![0; length];
+        let mut buffer = vec![0; length];
         self.reader.read_exact(&mut buffer)?;
         Ok(buffer)
     }
@@ -78,8 +78,8 @@ impl Iterator for WalIterator {
 
     fn next(&mut self) -> Option<WalEntry> {
         match self.read_wal_entry() {
-            Ok(entry) => { Some(entry) },
-            Err(_) => {None},
+            Ok(entry) => Some(entry),
+            Err(_) => None,
         }
     }
 }
@@ -97,7 +97,7 @@ impl Clone for Wal {
 }
 
 impl Wal {
-    pub fn new(dir: &Path) -> io::Result<Wal> {
+    pub fn new(dir: &Path) -> io::Result<Self> {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -107,14 +107,14 @@ impl Wal {
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
         let file = BufWriter::new(file);
 
-        Ok(Wal { path, file })
+        Ok(Self { path, file })
     }
 
-    pub fn from_path(path: &Path) -> io::Result<Wal> {
+    pub fn from_path(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new().append(true).create(true).open(&path)?;
         let file = BufWriter::new(file);
 
-        Ok(Wal {
+        Ok(Self {
             path: path.to_owned(),
             file,
         })

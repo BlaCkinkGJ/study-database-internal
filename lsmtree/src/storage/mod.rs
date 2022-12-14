@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::{memtable::MemTable};
+use crate::memtable::MemTable;
 use anyhow::{bail, Result};
 
 // TODO: add multiplier for sstable
@@ -16,7 +16,7 @@ impl StorageConfig {
     pub fn default_config() -> Self {
         Self {
             threshold_bytes: 50,
-            dir: Path::new("./wal").to_path_buf(),
+            dir: Path::new("./tmp").to_path_buf(),
         }
     }
 }
@@ -29,17 +29,21 @@ pub struct Storage {
 }
 
 impl Storage {
-    pub fn new(config: StorageConfig) -> Result<Storage> {
+    pub fn new(config: StorageConfig) -> Result<Self> {
         let mutable = MemTable::load_from_dir(&config.dir)?;
         let immutable = vec![];
-        Ok(Storage { mutable, immutable, config })
+        Ok(Self {
+            mutable,
+            immutable,
+            config,
+        })
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>> {
         // check memtable
         if let Some(entry) = self.mutable.get(key) {
             if let Some(value) = entry.value.as_ref() {
-                return Ok(value.clone())
+                return Ok(value.clone());
             }
         };
 
@@ -47,7 +51,7 @@ impl Storage {
         for memtable in self.immutable.iter() {
             if let Some(entry) = memtable.get(key) {
                 if let Some(value) = entry.value.as_ref() {
-                    return Ok(value.clone())
+                    return Ok(value.clone());
                 }
             }
         }
@@ -86,9 +90,9 @@ impl Storage {
 
     pub fn drop(&mut self) -> Result<()> {
         self.mutable.drop()?;
-        self.immutable.iter_mut().for_each(|memtable|
-            memtable.drop().unwrap()
-        );
+        self.immutable
+            .iter_mut()
+            .for_each(|memtable| memtable.drop().unwrap());
         Ok(())
     }
 }

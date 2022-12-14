@@ -1,6 +1,9 @@
-use std::{path::{Path, PathBuf}, fs::{read_dir, remove_file}};
+use std::{
+    fs::{read_dir, remove_file},
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use crate::wal::Wal;
 
@@ -38,9 +41,9 @@ pub struct MemTable {
 }
 
 impl MemTable {
-    pub fn new(dir: &Path) -> Result<MemTable> {
+    pub fn new(dir: &Path) -> Result<Self> {
         println!("create!");
-        Ok(MemTable {
+        Ok(Self {
             entries: Vec::new(),
             size: 0,
             wal: Wal::new(dir)?,
@@ -48,18 +51,19 @@ impl MemTable {
         })
     }
 
-
     pub fn load_from_dir(dir: &Path) -> Result<Self> {
         let mut wal_files = files_with_ext(dir, "wal");
         wal_files.sort();
 
-        let mut new_mem_table = MemTable::new(dir)?;
+        let mut new_mem_table = Self::new(dir)?;
         for wal_file in wal_files.iter() {
             if let Ok(wal) = Wal::from_path(wal_file) {
                 for entry in wal.into_iter() {
                     if entry.deleted {
                         new_mem_table.delete(entry.key.as_slice(), entry.timestamp)?;
-                        new_mem_table.wal.delete(entry.key.as_slice(), entry.timestamp)?;
+                        new_mem_table
+                            .wal
+                            .delete(entry.key.as_slice(), entry.timestamp)?;
                     } else {
                         new_mem_table.set(
                             entry.key.as_slice(),
