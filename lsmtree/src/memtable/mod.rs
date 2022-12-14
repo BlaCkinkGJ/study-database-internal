@@ -42,7 +42,6 @@ pub struct MemTable {
 
 impl MemTable {
     pub fn new(dir: &Path) -> Result<Self> {
-        println!("create!");
         Ok(Self {
             entries: Vec::new(),
             size: 0,
