@@ -5,20 +5,7 @@ use std::{
 
 use anyhow::{bail, Result};
 
-use crate::wal::Wal;
-
-#[derive(Clone, Debug)]
-pub struct MemTableMeta {
-    pub timestamp: u128,
-    pub deleted: bool,
-}
-
-#[derive(Clone, Debug)]
-pub struct MemTableEntry {
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub meta: MemTableMeta,
-}
+use crate::{ds::TableEntry, wal::Wal};
 
 pub fn files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -34,7 +21,7 @@ pub fn files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
 
 #[derive(Clone, Debug)]
 pub struct MemTable {
-    entries: Vec<MemTableEntry>,
+    entries: Vec<TableEntry>,
     size: isize,
     wal: Wal,
     is_immutable: bool,
@@ -93,13 +80,11 @@ impl MemTable {
         if self.is_immutable {
             bail!("do not try to write immutable memory table")
         }
-        let entry = MemTableEntry {
+        let entry = TableEntry {
             key: key.to_owned(),
             value: Some(value.to_owned()),
-            meta: MemTableMeta {
-                timestamp,
-                deleted: false,
-            },
+            timestamp,
+            deleted: false,
         };
 
         match self.get_index(key) {
@@ -110,8 +95,10 @@ impl MemTable {
                 self.entries[idx] = entry;
             }
             Err(idx) => {
-                self.size +=
-                    (key.len() + value.len() + std::mem::size_of::<MemTableMeta>()) as isize;
+                self.size += (key.len()
+                    + value.len()
+                    + std::mem::size_of::<u128>()
+                    + std::mem::size_of::<bool>()) as isize;
                 self.entries.insert(idx, entry);
             }
         }
@@ -121,13 +108,11 @@ impl MemTable {
 
     // Add tombstone to memtable
     pub fn delete(&mut self, key: &[u8], timestamp: u128) -> Result<()> {
-        let entry = MemTableEntry {
+        let entry = TableEntry {
             key: key.to_owned(),
             value: None,
-            meta: MemTableMeta {
-                timestamp,
-                deleted: true,
-            },
+            timestamp,
+            deleted: true,
         };
         match self.get_index(key) {
             Ok(idx) => {
@@ -137,7 +122,8 @@ impl MemTable {
                 self.entries[idx] = entry;
             }
             Err(idx) => {
-                self.size += (key.len() + std::mem::size_of::<MemTableMeta>()) as isize;
+                self.size += (key.len() + std::mem::size_of::<u128>() + std::mem::size_of::<bool>())
+                    as isize;
                 self.entries.insert(idx, entry)
             }
         }
@@ -145,7 +131,7 @@ impl MemTable {
         Ok(())
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&MemTableEntry> {
+    pub fn get(&self, key: &[u8]) -> Option<&TableEntry> {
         if let Ok(idx) = self.get_index(key) {
             return Some(&self.entries[idx]);
         }

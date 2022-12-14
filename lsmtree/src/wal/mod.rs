@@ -5,13 +5,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-#[derive(Clone)]
-pub struct WalEntry {
-    pub key: Vec<u8>,
-    pub value: Option<Vec<u8>>,
-    pub timestamp: u128,
-    pub deleted: bool,
-}
+use crate::ds::TableEntry;
 
 pub struct WalIterator {
     reader: BufReader<File>,
@@ -48,7 +42,7 @@ impl WalIterator {
         Ok(buffer)
     }
 
-    fn read_wal_entry(&mut self) -> io::Result<WalEntry> {
+    fn read_wal_entry(&mut self) -> io::Result<TableEntry> {
         let key_len = self.read_usize()?;
         let deleted = self.read_bool()?;
 
@@ -64,7 +58,7 @@ impl WalIterator {
             (self.read_data(key_len)?, None)
         };
         let timestamp = self.read_u128()?;
-        Ok(WalEntry {
+        Ok(TableEntry {
             key,
             value,
             timestamp,
@@ -74,9 +68,9 @@ impl WalIterator {
 }
 
 impl Iterator for WalIterator {
-    type Item = WalEntry;
+    type Item = TableEntry;
 
-    fn next(&mut self) -> Option<WalEntry> {
+    fn next(&mut self) -> Option<TableEntry> {
         match self.read_wal_entry() {
             Ok(entry) => Some(entry),
             Err(_) => None,
@@ -151,7 +145,7 @@ impl Wal {
 
 impl IntoIterator for Wal {
     type IntoIter = WalIterator;
-    type Item = WalEntry;
+    type Item = TableEntry;
 
     fn into_iter(self) -> WalIterator {
         WalIterator::new(self.path).unwrap()
